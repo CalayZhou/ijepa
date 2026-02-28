@@ -23,6 +23,9 @@ parser.add_argument(
 parser.add_argument(
     '--devices', type=str, nargs='+', default=['cuda:0'],
     help='which devices to use on local machine')
+parser.add_argument(
+    '--debug', action='store_true',
+    help='run in a single process (rank 0 only) for easier IDE debugging')
 
 
 def process_main(rank, fname, world_size, devices):
@@ -56,10 +59,28 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     num_gpus = len(args.devices)
-    mp.set_start_method('spawn')
+    mp.set_start_method('spawn', force=True)
 
+    if args.debug:
+        process_main(
+            rank=0,
+            fname=args.fname,
+            world_size=1,
+            devices=[args.devices[0]])
+        raise SystemExit(0)
+
+    processes = []
     for rank in range(num_gpus):
-        mp.Process(
+        process = mp.Process(
             target=process_main,
             args=(rank, args.fname, num_gpus, args.devices)
-        ).start()
+        )
+        process.start()
+        processes.append(process)
+
+    for process in processes:
+        process.join()
+
+    failed = [proc.exitcode for proc in processes if proc.exitcode != 0]
+    if failed:
+        raise RuntimeError(f'One or more worker processes failed: {failed}')
