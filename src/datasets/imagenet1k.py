@@ -16,6 +16,8 @@ from logging import getLogger
 import torch
 import torchvision
 
+from src.datasets.thermal_dataset import ThermalDataset
+
 _GLOBAL_SEED = 0
 logger = getLogger()
 
@@ -33,7 +35,9 @@ def make_imagenet1k(
     training=True,
     copy_data=False,
     drop_last=True,
-    subset_file=None
+    subset_file=None,
+    thermal_dataset_path=None,
+    thermal_in1k=False
 ):
     dataset = ImageNet(
         root=root_path,
@@ -45,6 +49,14 @@ def make_imagenet1k(
     if subset_file is not None:
         dataset = ImageNetSubset(dataset, subset_file)
     logger.info('ImageNet dataset created')
+
+    if thermal_dataset_path is not None:
+        thermal_dataset = ThermalDataset(
+            dataset_path=thermal_dataset_path,
+            transform=transform,
+            in1k=thermal_in1k)
+        dataset = ImageNetThermalPair(dataset, thermal_dataset)
+        logger.info('Thermal dataset included for paired loading')
     dist_sampler = torch.utils.data.distributed.DistributedSampler(
         dataset=dataset,
         num_replicas=world_size,
@@ -172,6 +184,28 @@ class ImageNetSubset(object):
         if self.dataset.target_transform is not None:
             target = self.dataset.target_transform(target)
         return img, target
+
+
+class ImageNetThermalPair(object):
+
+    def __init__(self, imagenet_dataset, thermal_dataset):
+        self.imagenet_dataset = imagenet_dataset
+        self.thermal_dataset = thermal_dataset
+
+    def __len__(self):
+        return max(len(self.imagenet_dataset), len(self.thermal_dataset))
+
+    def __getitem__(self, index):
+        rgb_index = index % len(self.imagenet_dataset)
+        thermal_index = index % len(self.thermal_dataset)
+
+        rgb_data = self.imagenet_dataset[rgb_index]
+        if isinstance(rgb_data, tuple):
+            rgb_img = rgb_data[0]
+        else:
+            rgb_img = rgb_data
+        thermal_img = self.thermal_dataset[thermal_index]
+        return rgb_img, thermal_img
 
 
 def copy_imgnt_locally(

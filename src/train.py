@@ -95,6 +95,8 @@ def main(args, resume_preempt=False):
     num_workers = args['data']['num_workers']
     root_path = args['data']['root_path']
     image_folder = args['data']['image_folder']
+    thermal_dataset_path = args['data'].get('thermal_dataset_path', None)
+    thermal_in1k = args['data'].get('thermal_in1k', False)
     crop_size = args['data']['crop_size']
     crop_scale = args['data']['crop_scale']
     # --
@@ -201,7 +203,9 @@ def main(args, resume_preempt=False):
             root_path=root_path,
             image_folder=image_folder,
             copy_data=copy_data,
-            drop_last=True)
+            drop_last=True,
+            thermal_dataset_path=thermal_dataset_path,
+            thermal_in1k=thermal_in1k)
     ipe = len(unsupervised_loader)
 
     # -- init optimizer and scheduler
@@ -275,15 +279,23 @@ def main(args, resume_preempt=False):
         maskB_meter = AverageMeter()
         time_meter = AverageMeter()
 
-        for itr, (udata, masks_enc, masks_pred) in enumerate(unsupervised_loader):
+        if thermal_dataset_path is None:
+            loader_iter = ((udata, None, masks_enc, masks_pred)
+                           for (udata, masks_enc, masks_pred) in unsupervised_loader)
+        else:
+            loader_iter = ((udata, udata_ir, masks_enc, masks_pred)
+                           for ((udata, udata_ir), masks_enc, masks_pred) in unsupervised_loader)
+
+        for itr, (udata, udata_ir, masks_enc, masks_pred) in enumerate(loader_iter):
 
             def load_imgs():
                 # -- unsupervised imgs
-                imgs = udata[0].to(device, non_blocking=True)
+                imgs = udata.to(device, non_blocking=True) if thermal_dataset_path is not None else udata[0].to(device, non_blocking=True)
+                imgs_ir = None if udata_ir is None else udata_ir.to(device, non_blocking=True)
                 masks_1 = [u.to(device, non_blocking=True) for u in masks_enc]
                 masks_2 = [u.to(device, non_blocking=True) for u in masks_pred]
-                return (imgs, masks_1, masks_2)
-            imgs, masks_enc, masks_pred = load_imgs()
+                return (imgs, imgs_ir, masks_1, masks_2)
+            imgs, imgs_ir, masks_enc, masks_pred = load_imgs()
             maskA_meter.update(len(masks_enc[0][0]))
             maskB_meter.update(len(masks_pred[0][0]))
 
