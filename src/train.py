@@ -63,6 +63,31 @@ torch.backends.cudnn.benchmark = True
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger()
 
+def _extract_model_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return checkpoint
+
+    for key in ('target_encoder', 'encoder', 'model', 'state_dict'):
+        state_dict = checkpoint.get(key)
+        if isinstance(state_dict, dict):
+            return state_dict
+
+    return checkpoint
+
+
+def _maybe_convert_module_prefix(state_dict, needs_module_prefix):
+    if not isinstance(state_dict, dict) or len(state_dict) == 0:
+        return state_dict
+
+    has_module_prefix = next(iter(state_dict)).startswith('module.')
+    if has_module_prefix == needs_module_prefix:
+        return state_dict
+
+    if needs_module_prefix:
+        return {k if k.startswith('module.') else f'module.{k}': v for k, v in state_dict.items()}
+
+    return {k[len('module.'):] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+
 
 def main(args, resume_preempt=False):
 
@@ -233,9 +258,15 @@ def main(args, resume_preempt=False):
 
     if target_encoder_ckpt is not None:
         checkpoint = torch.load(target_encoder_ckpt, map_location='cpu')
-        pretrained_dict = checkpoint.get('target_encoder', checkpoint.get('encoder', checkpoint))
-        msg = target_encoder.module.load_state_dict(pretrained_dict, strict=False)
-        logger.info(f'loaded pretrained target encoder from {target_encoder_ckpt} with msg: {msg}')
+        pretrained_dict = _extract_model_state_dict(checkpoint)
+        needs_module_prefix = next(iter(target_encoder.state_dict())).startswith('module.')
+        pretrained_dict = _maybe_convert_module_prefix(pretrained_dict, needs_module_prefix)
+        msg = target_encoder.load_state_dict(pretrained_dict, strict=False)
+        logger.info(
+            'loaded pretrained target encoder from %s (missing=%d, unexpected=%d)',
+            target_encoder_ckpt,
+            len(msg.missing_keys),
+            len(msg.unexpected_keys))
 
     start_epoch = 0
     # -- load training checkpoint
