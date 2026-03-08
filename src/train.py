@@ -17,7 +17,6 @@ try:
 except Exception:
     pass
 
-import copy
 import logging
 import sys
 import yaml
@@ -25,6 +24,7 @@ import yaml
 import numpy as np
 
 import torch
+import src.models.vision_transformer as vit
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
@@ -63,6 +63,31 @@ torch.backends.cudnn.benchmark = True
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger()
 
+def _extract_model_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return checkpoint
+
+    for key in ('target_encoder', 'encoder', 'model', 'state_dict'):
+        state_dict = checkpoint.get(key)
+        if isinstance(state_dict, dict):
+            return state_dict
+
+    return checkpoint
+
+
+def _maybe_convert_module_prefix(state_dict, needs_module_prefix):
+    if not isinstance(state_dict, dict) or len(state_dict) == 0:
+        return state_dict
+
+    has_module_prefix = next(iter(state_dict)).startswith('module.')
+    if has_module_prefix == needs_module_prefix:
+        return state_dict
+
+    if needs_module_prefix:
+        return {k if k.startswith('module.') else f'module.{k}': v for k, v in state_dict.items()}
+
+    return {k[len('module.'):] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+
 
 def main(args, resume_preempt=False):
 
@@ -78,6 +103,10 @@ def main(args, resume_preempt=False):
     copy_data = args['meta']['copy_data']
     pred_depth = args['meta']['pred_depth']
     pred_emb_dim = args['meta']['pred_emb_dim']
+    target_model_name = args['meta'].get('target_model_name', model_name)
+    target_encoder_ckpt = args['meta'].get('target_encoder_checkpoint')
+    if target_model_name not in vit.VIT_EMBED_DIMS:
+        raise ValueError(f'Unknown target model name: {target_model_name}')
     if not torch.cuda.is_available():
         device = torch.device('cpu')
     else:
@@ -111,7 +140,6 @@ def main(args, resume_preempt=False):
     # --
 
     # -- OPTIMIZATION
-    ema = args['optimization']['ema']
     ipe_scale = args['optimization']['ipe_scale']  # scheduler scale factor (def: 1.0)
     wd = float(args['optimization']['weight_decay'])
     final_wd = float(args['optimization']['final_weight_decay'])
@@ -159,14 +187,18 @@ def main(args, resume_preempt=False):
                            ('%d', 'time (ms)'))
 
     # -- init model
+    target_embed_dim = vit.VIT_EMBED_DIMS[target_model_name]
     encoder, predictor = init_model(
         device=device,
         patch_size=patch_size,
         crop_size=crop_size,
         pred_depth=pred_depth,
         pred_emb_dim=pred_emb_dim,
+        pred_out_dim=target_embed_dim,
         model_name=model_name)
-    target_encoder = copy.deepcopy(encoder)
+    target_encoder = vit.__dict__[target_model_name](
+        img_size=[crop_size],
+        patch_size=patch_size).to(device)
 
     # -- make data transforms
     mask_collator = MBMaskCollator(
@@ -224,9 +256,17 @@ def main(args, resume_preempt=False):
     for p in target_encoder.parameters():
         p.requires_grad = False
 
-    # -- momentum schedule
-    momentum_scheduler = (ema[0] + i*(ema[1]-ema[0])/(ipe*num_epochs*ipe_scale)
-                          for i in range(int(ipe*num_epochs*ipe_scale)+1))
+    if target_encoder_ckpt is not None:
+        checkpoint = torch.load(target_encoder_ckpt, map_location='cpu')
+        pretrained_dict = _extract_model_state_dict(checkpoint)
+        needs_module_prefix = next(iter(target_encoder.state_dict())).startswith('module.')
+        pretrained_dict = _maybe_convert_module_prefix(pretrained_dict, needs_module_prefix)
+        msg = target_encoder.load_state_dict(pretrained_dict, strict=False)
+        logger.info(
+            'loaded pretrained target encoder from %s (missing=%d, unexpected=%d)',
+            target_encoder_ckpt,
+            len(msg.missing_keys),
+            len(msg.unexpected_keys))
 
     start_epoch = 0
     # -- load training checkpoint
@@ -242,7 +282,6 @@ def main(args, resume_preempt=False):
         for _ in range(start_epoch*ipe):
             scheduler.step()
             wd_scheduler.step()
-            next(momentum_scheduler)
             mask_collator.step()
 
     def save_checkpoint(epoch):
@@ -328,12 +367,6 @@ def main(args, resume_preempt=False):
                     optimizer.step()
                 grad_stats = grad_logger(encoder.named_parameters())
                 optimizer.zero_grad()
-
-                # Step 3. momentum update of target encoder
-                with torch.no_grad():
-                    m = next(momentum_scheduler)
-                    for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
-                        param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
 
                 return (float(loss), _new_lr, _new_wd, grad_stats)
             (loss, _new_lr, _new_wd, grad_stats), etime = gpu_timer(train_step)

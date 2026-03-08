@@ -71,7 +71,8 @@ def init_model(
     model_name='vit_base',
     crop_size=224,
     pred_depth=6,
-    pred_emb_dim=384
+    pred_emb_dim=384,
+    pred_out_dim=None
 ):
     encoder = vit.__dict__[model_name](
         img_size=[crop_size],
@@ -80,6 +81,7 @@ def init_model(
         num_patches=encoder.patch_embed.num_patches,
         embed_dim=encoder.embed_dim,
         predictor_embed_dim=pred_emb_dim,
+        out_embed_dim=pred_out_dim,
         depth=pred_depth,
         num_heads=encoder.num_heads)
 

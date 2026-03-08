@@ -223,6 +223,7 @@ class VisionTransformerPredictor(nn.Module):
         self,
         num_patches,
         embed_dim=768,
+        out_embed_dim=None,
         predictor_embed_dim=384,
         depth=6,
         num_heads=12,
@@ -237,6 +238,7 @@ class VisionTransformerPredictor(nn.Module):
         **kwargs
     ):
         super().__init__()
+        out_embed_dim = out_embed_dim or embed_dim
         self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim, bias=True)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_embed_dim))
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
@@ -254,7 +256,7 @@ class VisionTransformerPredictor(nn.Module):
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
             for i in range(depth)])
         self.predictor_norm = norm_layer(predictor_embed_dim)
-        self.predictor_proj = nn.Linear(predictor_embed_dim, embed_dim, bias=True)
+        self.predictor_proj = nn.Linear(predictor_embed_dim, out_embed_dim, bias=True)
         # ------
         self.init_std = init_std
         trunc_normal_(self.mask_token, std=self.init_std)
