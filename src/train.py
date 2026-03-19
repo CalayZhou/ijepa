@@ -120,6 +120,7 @@ def main(args, resume_preempt=False):
     start_lr = args['optimization']['start_lr']
     lr = args['optimization']['lr']
     final_lr = args['optimization']['final_lr']
+    accumulation_steps = int(args['optimization'].get('accumulation_steps', 1))
 
     # -- LOGGING
     folder = args['logging']['folder']
@@ -128,6 +129,9 @@ def main(args, resume_preempt=False):
     dump = os.path.join(folder, 'params-ijepa.yaml')
     with open(dump, 'w') as f:
         yaml.dump(args, f)
+
+    if accumulation_steps < 1:
+        raise ValueError('optimization.accumulation_steps must be >= 1')
     # ----------------------------------------------------------------------- #
 
     try:
@@ -203,6 +207,8 @@ def main(args, resume_preempt=False):
             copy_data=copy_data,
             drop_last=True)
     ipe = len(unsupervised_loader)
+    if rank == 0 and accumulation_steps > 1:
+        logger.info(f'Using gradient accumulation: {accumulation_steps} steps')
 
     # -- init optimizer and scheduler
     optimizer, scaler, scheduler, wd_scheduler = init_opt(
@@ -274,6 +280,7 @@ def main(args, resume_preempt=False):
         maskA_meter = AverageMeter()
         maskB_meter = AverageMeter()
         time_meter = AverageMeter()
+        optimizer.zero_grad(set_to_none=True)
 
         for itr, (udata, masks_enc, masks_pred) in enumerate(unsupervised_loader):
 
@@ -287,11 +294,9 @@ def main(args, resume_preempt=False):
             maskA_meter.update(len(masks_enc[0][0]))
             maskB_meter.update(len(masks_pred[0][0]))
 
-            def train_step():
-                _new_lr = scheduler.step()
-                _new_wd = wd_scheduler.step()
-                # --
+            is_update_step = ((itr + 1) % accumulation_steps == 0) or ((itr + 1) == ipe)
 
+            def train_step():
                 def forward_target():
                     with torch.no_grad():
                         h = target_encoder(imgs)
@@ -315,25 +320,40 @@ def main(args, resume_preempt=False):
                 # Step 1. Forward
                 with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bfloat16):
                     h = forward_target()
-                    z = forward_context()
-                    loss = loss_fn(z, h)
+                    if not is_update_step and hasattr(encoder, 'no_sync') and hasattr(predictor, 'no_sync'):
+                        with encoder.no_sync(), predictor.no_sync():
+                            z = forward_context()
+                            loss = loss_fn(z, h)
+                    else:
+                        z = forward_context()
+                        loss = loss_fn(z, h)
 
-                #  Step 2. Backward & step
+                #  Step 2. Backward
+                loss_to_backward = loss / accumulation_steps
                 if use_bfloat16:
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
+                    scaler.scale(loss_to_backward).backward()
                 else:
-                    loss.backward()
-                    optimizer.step()
-                grad_stats = grad_logger(encoder.named_parameters())
-                optimizer.zero_grad()
+                    loss_to_backward.backward()
 
-                # Step 3. momentum update of target encoder
-                with torch.no_grad():
-                    m = next(momentum_scheduler)
-                    for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
-                        param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
+                grad_stats, _new_lr, _new_wd = None, optimizer.param_groups[0]['lr'], optimizer.param_groups[0]['weight_decay']
+
+                # Step 3. Optimizer/scheduler update (only on accumulation boundary)
+                if is_update_step:
+                    if use_bfloat16:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    _new_lr = scheduler.step()
+                    _new_wd = wd_scheduler.step()
+                    grad_stats = grad_logger(encoder.named_parameters())
+                    optimizer.zero_grad(set_to_none=True)
+
+                    # Step 4. momentum update of target encoder
+                    with torch.no_grad():
+                        m = next(momentum_scheduler)
+                        for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
+                            param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
 
                 return (float(loss), _new_lr, _new_wd, grad_stats)
             (loss, _new_lr, _new_wd, grad_stats), etime = gpu_timer(train_step)

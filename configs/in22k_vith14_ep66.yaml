@@ -52,5 +52,6 @@ optimization:
   ipe_scale: 1.0
   lr: 0.001
   start_lr: 0.0002
+  accumulation_steps: 1  # increase to simulate larger effective batch size with less GPU memory
   warmup: 3
   weight_decay: 0.04
