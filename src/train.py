@@ -42,6 +42,15 @@ from src.utils.logging import (
     AverageMeter)
 from src.utils.tensors import repeat_interleave_batch
 from src.datasets.imagenet1k import make_imagenet1k
+from src.datasets.video_frames import (
+    make_video_frame_loader,
+    make_imagenet_and_video_frame_loader,
+)
+from src.datasets.mvi_frame import (
+    make_mvi_frame_loader,
+    make_imagenet_and_mvi_frame_loader,
+    make_imagenet_video_and_mvi_frame_loader,
+)
 
 from src.helper import (
     load_checkpoint,
@@ -93,8 +102,11 @@ def main(args, resume_preempt=False):
     batch_size = args['data']['batch_size']
     pin_mem = args['data']['pin_mem']
     num_workers = args['data']['num_workers']
-    root_path = args['data']['root_path']
-    image_folder = args['data']['image_folder']
+    root_path = args['data'].get('root_path')
+    image_folder = args['data'].get('image_folder')
+    dataset_type = args['data'].get('dataset_type', 'imagenet1k')
+    video_roots = args['data'].get('video_roots', [])
+    view_roots = args['data'].get('view_roots', [])
     crop_size = args['data']['crop_size']
     crop_scale = args['data']['crop_scale']
     # --
@@ -189,7 +201,73 @@ def main(args, resume_preempt=False):
         color_jitter=color_jitter)
 
     # -- init data-loaders/samplers
-    _, unsupervised_loader, unsupervised_sampler = make_imagenet1k(
+    if dataset_type == 'video_first_frame':
+        _, unsupervised_loader, unsupervised_sampler = make_video_frame_loader(
+            transform=transform,
+            batch_size=batch_size,
+            collator=mask_collator,
+            pin_mem=pin_mem,
+            num_workers=num_workers,
+            world_size=world_size,
+            rank=rank,
+            video_roots=video_roots,
+            drop_last=True)
+    elif dataset_type == 'imagenet_plus_video_first_frame':
+        _, unsupervised_loader, unsupervised_sampler = make_imagenet_and_video_frame_loader(
+            transform=transform,
+            batch_size=batch_size,
+            collator=mask_collator,
+            pin_mem=pin_mem,
+            num_workers=num_workers,
+            world_size=world_size,
+            rank=rank,
+            root_path=root_path,
+            image_folder=image_folder,
+            copy_data=copy_data,
+            video_roots=video_roots,
+            drop_last=True)
+    elif dataset_type == 'mvi_first_frame':
+        _, unsupervised_loader, unsupervised_sampler = make_mvi_frame_loader(
+            transform=transform,
+            batch_size=batch_size,
+            collator=mask_collator,
+            pin_mem=pin_mem,
+            num_workers=num_workers,
+            world_size=world_size,
+            rank=rank,
+            view_roots=view_roots,
+            drop_last=True)
+    elif dataset_type == 'imagenet_plus_mvi_first_frame':
+        _, unsupervised_loader, unsupervised_sampler = make_imagenet_and_mvi_frame_loader(
+            transform=transform,
+            batch_size=batch_size,
+            collator=mask_collator,
+            pin_mem=pin_mem,
+            num_workers=num_workers,
+            world_size=world_size,
+            rank=rank,
+            root_path=root_path,
+            image_folder=image_folder,
+            copy_data=copy_data,
+            view_roots=view_roots,
+            drop_last=True)
+    elif dataset_type == 'imagenet_plus_video_plus_mvi_first_frame':
+        _, unsupervised_loader, unsupervised_sampler = make_imagenet_video_and_mvi_frame_loader(
+            transform=transform,
+            batch_size=batch_size,
+            collator=mask_collator,
+            pin_mem=pin_mem,
+            num_workers=num_workers,
+            world_size=world_size,
+            rank=rank,
+            root_path=root_path,
+            image_folder=image_folder,
+            copy_data=copy_data,
+            video_roots=video_roots,
+            view_roots=view_roots,
+            drop_last=True)
+    else:
+        _, unsupervised_loader, unsupervised_sampler = make_imagenet1k(
             transform=transform,
             batch_size=batch_size,
             collator=mask_collator,
