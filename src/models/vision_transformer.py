@@ -150,6 +150,37 @@ class Attention(nn.Module):
         return x, attn
 
 
+class CrossAttention(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.k = nn.Linear(dim, dim, bias=qkv_bias)
+        self.v = nn.Linear(dim, dim, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x_q, x_kv):
+        B, Nq, C = x_q.shape
+        Nk = x_kv.shape[1]
+        q = self.q(x_q).reshape(B, Nq, self.num_heads, C // self.num_heads).transpose(1, 2)
+        k = self.k(x_kv).reshape(B, Nk, self.num_heads, C // self.num_heads).transpose(1, 2)
+        v = self.v(x_kv).reshape(B, Nk, self.num_heads, C // self.num_heads).transpose(1, 2)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, Nq, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x, attn
+
+
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
@@ -169,6 +200,27 @@ class Block(nn.Module):
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
+
+
+class CrossAttentionBlock(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0.,
+                 attn_drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.norm_q = norm_layer(dim)
+        self.norm_kv = norm_layer(dim)
+        self.cross_attn = CrossAttention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
+            attn_drop=attn_drop, proj_drop=drop)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+    def forward(self, x_q, x_kv):
+        y, _ = self.cross_attn(self.norm_q(x_q), self.norm_kv(x_kv))
+        x_q = x_q + self.drop_path(y)
+        x_q = x_q + self.drop_path(self.mlp(self.norm2(x_q)))
+        return x_q
 
 
 class PatchEmbed(nn.Module):
@@ -249,7 +301,7 @@ class VisionTransformerPredictor(nn.Module):
         self.predictor_pos_embed.data.copy_(torch.from_numpy(predictor_pos_embed).float().unsqueeze(0))
         # --
         self.predictor_blocks = nn.ModuleList([
-            Block(
+            CrossAttentionBlock(
                 dim=predictor_embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
             for i in range(depth)])
@@ -266,7 +318,7 @@ class VisionTransformerPredictor(nn.Module):
             param.div_(math.sqrt(2.0 * layer_id))
 
         for layer_id, layer in enumerate(self.predictor_blocks):
-            rescale(layer.attn.proj.weight.data, layer_id + 1)
+            rescale(layer.cross_attn.proj.weight.data, layer_id + 1)
             rescale(layer.mlp.fc2.weight.data, layer_id + 1)
 
     def _init_weights(self, m):
@@ -282,7 +334,7 @@ class VisionTransformerPredictor(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x, masks_x, masks):
+    def forward(self, x_q, x_kv, masks_x, masks):
         assert (masks is not None) and (masks_x is not None), 'Cannot run predictor without mask indices'
 
         if not isinstance(masks_x, list):
@@ -292,18 +344,22 @@ class VisionTransformerPredictor(nn.Module):
             masks = [masks]
 
         # -- Batch Size
-        B = len(x) // len(masks_x)
+        B = len(x_q) // len(masks_x)
 
-        # -- map from encoder-dim to pedictor-dim
-        x = self.predictor_embed(x)
+        # -- map from encoder-dim to predictor-dim
+        x_q = self.predictor_embed(x_q)
+        x_kv = self.predictor_embed(x_kv)
 
-        # -- add positional embedding to x tokens
-        x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
-        x += apply_masks(x_pos_embed, masks_x)
+        # -- add positional embedding to visible img2 tokens (queries)
+        q_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
+        x_q += apply_masks(q_pos_embed, masks_x)
 
-        _, N_ctxt, D = x.shape
+        _, N_ctxt, _ = x_q.shape
 
-        # -- concat mask tokens to x
+        # -- add positional embedding to img1 tokens (keys/values)
+        x_kv = x_kv + self.predictor_pos_embed.repeat(B, 1, 1)
+
+        # -- append masked query tokens for img2
         pos_embs = self.predictor_pos_embed.repeat(B, 1, 1)
         pos_embs = apply_masks(pos_embs, masks)
         pos_embs = repeat_interleave_batch(pos_embs, B, repeat=len(masks_x))
@@ -311,19 +367,20 @@ class VisionTransformerPredictor(nn.Module):
         pred_tokens = self.mask_token.repeat(pos_embs.size(0), pos_embs.size(1), 1)
         # --
         pred_tokens += pos_embs
-        x = x.repeat(len(masks), 1, 1)
-        x = torch.cat([x, pred_tokens], dim=1)
+        x_q = x_q.repeat(len(masks), 1, 1)
+        x_q = torch.cat([x_q, pred_tokens], dim=1)
+        x_kv = x_kv.repeat(len(masks), 1, 1)
 
         # -- fwd prop
         for blk in self.predictor_blocks:
-            x = blk(x)
-        x = self.predictor_norm(x)
+            x_q = blk(x_q, x_kv)
+        x_q = self.predictor_norm(x_q)
 
         # -- return preds for mask tokens
-        x = x[:, N_ctxt:]
-        x = self.predictor_proj(x)
+        x_q = x_q[:, N_ctxt:]
+        x_q = self.predictor_proj(x_q)
 
-        return x
+        return x_q
 
 
 class VisionTransformer(nn.Module):

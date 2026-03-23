@@ -6,21 +6,52 @@
 #
 
 import os
+import random
 from logging import getLogger
 
 from PIL import Image
 
+import numpy as np
 import torch
 from torch.utils.data import ConcatDataset, Dataset
 
 from src.datasets.imagenet1k import ImageNet
-from src.datasets.video_frames import MultiVideoFirstFrameDataset
+from src.datasets.video_frames import (
+    MultiVideoFramePairDataset,
+    SiamImageNetAdapter,
+)
 
 logger = getLogger()
 
 
-class MultiViewFirstFrameDataset(Dataset):
-    """Dataset that loads the first frame from each multi-view sample folder."""
+def _apply_shared_transform(img1, img2, transform):
+    if transform is None:
+        return img1, img2
+
+    seed = torch.randint(0, 2**31, (1,)).item()
+    torch_state = torch.get_rng_state()
+    np_state = np.random.get_state()
+    py_state = random.getstate()
+    try:
+        torch.manual_seed(seed)
+        np.random.seed(seed % (2**32 - 1))
+        random.seed(seed)
+        out1 = transform(img1)
+
+        torch.manual_seed(seed)
+        np.random.seed(seed % (2**32 - 1))
+        random.seed(seed)
+        out2 = transform(img2)
+    finally:
+        torch.set_rng_state(torch_state)
+        np.random.set_state(np_state)
+        random.setstate(py_state)
+
+    return out1, out2
+
+
+class MultiViewFramePairDataset(Dataset):
+    """Dataset that loads a random ordered frame pair from each sample folder."""
 
     IMG_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
 
@@ -31,11 +62,11 @@ class MultiViewFirstFrameDataset(Dataset):
 
         if not self.samples:
             raise RuntimeError(
-                f'No valid first-frame samples found in view_roots={self.view_roots}'
+                f'No valid frame-pair samples found in view_roots={self.view_roots}'
             )
 
         logger.info(
-            'Initialized MultiViewFirstFrameDataset with %d samples from %d roots',
+            'Initialized MultiViewFramePairDataset with %d samples from %d roots',
             len(self.samples),
             len(self.view_roots),
         )
@@ -53,11 +84,11 @@ class MultiViewFirstFrameDataset(Dataset):
                     name for name in filenames
                     if name.lower().endswith(self.IMG_EXTENSIONS)
                 ]
-                if not frame_names:
+                if len(frame_names) < 2:
                     continue
 
                 frame_names.sort()
-                samples.append(os.path.join(dirpath, frame_names[0]))
+                samples.append([os.path.join(dirpath, fn) for fn in frame_names])
                 root_count += 1
 
             logger.info('Collected %d samples from %s', root_count, root)
@@ -68,14 +99,15 @@ class MultiViewFirstFrameDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index):
-        frame_path = self.samples[index]
-        img = Image.open(frame_path).convert('RGB')
+        frame_paths = self.samples[index]
+        first_idx = torch.randint(0, len(frame_paths) - 1, (1,)).item()
+        second_idx = torch.randint(first_idx + 1, len(frame_paths), (1,)).item()
+        img1 = Image.open(frame_paths[first_idx]).convert('RGB')
+        img2 = Image.open(frame_paths[second_idx]).convert('RGB')
 
-        if self.transform is not None:
-            img = self.transform(img)
+        img1, img2 = _apply_shared_transform(img1, img2, self.transform)
 
-        # Keep tuple shape compatible with existing collator/training loop.
-        return img, 0
+        return img1, img2, 0
 
 
 def make_mvi_frame_loader(
@@ -90,7 +122,7 @@ def make_mvi_frame_loader(
     drop_last=True,
 ):
     view_roots = view_roots or []
-    dataset = MultiViewFirstFrameDataset(
+    dataset = MultiViewFramePairDataset(
         view_roots=view_roots,
         transform=transform,
     )
@@ -112,7 +144,7 @@ def make_mvi_frame_loader(
         persistent_workers=False,
     )
 
-    logger.info('Multi-view first-frame unsupervised data loader created')
+    logger.info('Multi-view frame-pair unsupervised data loader created')
     return dataset, data_loader, dist_sampler
 
 
@@ -140,14 +172,15 @@ def make_imagenet_and_mvi_frame_loader(
         copy_data=copy_data,
         index_targets=False,
     )
-    mvi_dataset = MultiViewFirstFrameDataset(
+    mvi_dataset = MultiViewFramePairDataset(
         view_roots=view_roots,
         transform=transform,
     )
+    imagenet_dataset = SiamImageNetAdapter(imagenet_dataset)
 
     dataset = ConcatDataset([imagenet_dataset, mvi_dataset])
     logger.info(
-        'Combined dataset created: ImageNet=%d, multi-view-first-frame=%d, total=%d',
+        'Combined dataset created: ImageNet=%d, multi-view-frame-pair=%d, total=%d',
         len(imagenet_dataset),
         len(mvi_dataset),
         len(dataset),
@@ -170,7 +203,7 @@ def make_imagenet_and_mvi_frame_loader(
         persistent_workers=False,
     )
 
-    logger.info('ImageNet + multi-view first-frame unsupervised data loader created')
+    logger.info('ImageNet + multi-view frame-pair unsupervised data loader created')
     return dataset, data_loader, dist_sampler
 
 
@@ -200,19 +233,20 @@ def make_imagenet_video_and_mvi_frame_loader(
         copy_data=copy_data,
         index_targets=False,
     )
-    video_dataset = MultiVideoFirstFrameDataset(
+    video_dataset = MultiVideoFramePairDataset(
         video_roots=video_roots,
         transform=transform,
     )
-    mvi_dataset = MultiViewFirstFrameDataset(
+    mvi_dataset = MultiViewFramePairDataset(
         view_roots=view_roots,
         transform=transform,
     )
+    imagenet_dataset = SiamImageNetAdapter(imagenet_dataset)
 
     dataset = ConcatDataset([imagenet_dataset, video_dataset, mvi_dataset])
     logger.info(
-        'Combined dataset created: ImageNet=%d, video-first-frame=%d, '
-        'multi-view-first-frame=%d, total=%d',
+        'Combined dataset created: ImageNet=%d, video-frame-pair=%d, '
+        'multi-view-frame-pair=%d, total=%d',
         len(imagenet_dataset),
         len(video_dataset),
         len(mvi_dataset),
@@ -237,7 +271,7 @@ def make_imagenet_video_and_mvi_frame_loader(
     )
 
     logger.info(
-        'ImageNet + video first-frame + multi-view first-frame '
+        'ImageNet + video frame-pair + multi-view frame-pair '
         'unsupervised data loader created'
     )
     return dataset, data_loader, dist_sampler

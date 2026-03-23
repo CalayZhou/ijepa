@@ -6,10 +6,12 @@
 #
 
 import os
+import random
 from logging import getLogger
 
 from PIL import Image
 
+import numpy as np
 import torch
 from torch.utils.data import ConcatDataset, Dataset
 
@@ -18,8 +20,34 @@ from src.datasets.imagenet1k import ImageNet
 logger = getLogger()
 
 
-class MultiVideoFirstFrameDataset(Dataset):
-    """Dataset that loads the first frame from each per-video frame folder."""
+def _apply_shared_transform(img1, img2, transform):
+    if transform is None:
+        return img1, img2
+
+    seed = torch.randint(0, 2**31, (1,)).item()
+    torch_state = torch.get_rng_state()
+    np_state = np.random.get_state()
+    py_state = random.getstate()
+    try:
+        torch.manual_seed(seed)
+        np.random.seed(seed % (2**32 - 1))
+        random.seed(seed)
+        out1 = transform(img1)
+
+        torch.manual_seed(seed)
+        np.random.seed(seed % (2**32 - 1))
+        random.seed(seed)
+        out2 = transform(img2)
+    finally:
+        torch.set_rng_state(torch_state)
+        np.random.set_state(np_state)
+        random.setstate(py_state)
+
+    return out1, out2
+
+
+class MultiVideoFramePairDataset(Dataset):
+    """Dataset that loads a random ordered frame pair from each per-video folder."""
 
     IMG_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
 
@@ -30,11 +58,11 @@ class MultiVideoFirstFrameDataset(Dataset):
 
         if not self.samples:
             raise RuntimeError(
-                f'No valid first-frame samples found in video_roots={self.video_roots}'
+                f'No valid frame-pair samples found in video_roots={self.video_roots}'
             )
 
         logger.info(
-            'Initialized MultiVideoFirstFrameDataset with %d samples from %d roots',
+            'Initialized MultiVideoFramePairDataset with %d samples from %d roots',
             len(self.samples),
             len(self.video_roots)
         )
@@ -51,40 +79,55 @@ class MultiVideoFirstFrameDataset(Dataset):
                 if not entry.is_dir():
                     continue
 
-                first_frame = self._find_first_frame(entry.path)
-                if first_frame is None:
+                frame_paths = self._find_frames(entry.path)
+                if frame_paths is None:
                     continue
 
-                samples.append(first_frame)
+                samples.append(frame_paths)
                 root_count += 1
 
             logger.info('Collected %d samples from %s', root_count, root)
 
         return samples
 
-    def _find_first_frame(self, folder_path):
-        frame_names = [
-            f.name for f in os.scandir(folder_path)
+    def _find_frames(self, folder_path):
+        frame_paths = [
+            os.path.join(folder_path, f.name) for f in os.scandir(folder_path)
             if f.is_file() and f.name.lower().endswith(self.IMG_EXTENSIONS)
         ]
-        if not frame_names:
+        if len(frame_paths) < 2:
             return None
 
-        frame_names.sort()
-        return os.path.join(folder_path, frame_names[0])
+        frame_paths.sort()
+        return frame_paths
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index):
-        frame_path = self.samples[index]
-        img = Image.open(frame_path).convert('RGB')
+        frame_paths = self.samples[index]
+        first_idx = torch.randint(0, len(frame_paths) - 1, (1,)).item()
+        second_idx = torch.randint(first_idx + 1, len(frame_paths), (1,)).item()
+        img1 = Image.open(frame_paths[first_idx]).convert('RGB')
+        img2 = Image.open(frame_paths[second_idx]).convert('RGB')
 
-        if self.transform is not None:
-            img = self.transform(img)
+        img1, img2 = _apply_shared_transform(img1, img2, self.transform)
 
-        # Keep tuple shape compatible with existing collator/training loop.
-        return img, 0
+        return img1, img2, 0
+
+
+class SiamImageNetAdapter(Dataset):
+    """Adapter that turns single images into Siam-style (img1, img2, target)."""
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        img, target = self.dataset[index]
+        return img, img, target
 
 
 def make_video_frame_loader(
@@ -99,7 +142,7 @@ def make_video_frame_loader(
     drop_last=True,
 ):
     video_roots = video_roots or []
-    dataset = MultiVideoFirstFrameDataset(
+    dataset = MultiVideoFramePairDataset(
         video_roots=video_roots,
         transform=transform,
     )
@@ -121,7 +164,7 @@ def make_video_frame_loader(
         persistent_workers=False,
     )
 
-    logger.info('Video first-frame unsupervised data loader created')
+    logger.info('Video frame-pair unsupervised data loader created')
     return dataset, data_loader, dist_sampler
 
 
@@ -149,14 +192,15 @@ def make_imagenet_and_video_frame_loader(
         copy_data=copy_data,
         index_targets=False,
     )
-    video_dataset = MultiVideoFirstFrameDataset(
+    video_dataset = MultiVideoFramePairDataset(
         video_roots=video_roots,
         transform=transform,
     )
+    imagenet_dataset = SiamImageNetAdapter(imagenet_dataset)
 
     dataset = ConcatDataset([imagenet_dataset, video_dataset])
     logger.info(
-        'Combined dataset created: ImageNet=%d, video-first-frame=%d, total=%d',
+        'Combined dataset created: ImageNet=%d, video-frame-pair=%d, total=%d',
         len(imagenet_dataset),
         len(video_dataset),
         len(dataset),
@@ -179,5 +223,5 @@ def make_imagenet_and_video_frame_loader(
         persistent_workers=False,
     )
 
-    logger.info('ImageNet + video first-frame unsupervised data loader created')
+    logger.info('ImageNet + video frame-pair unsupervised data loader created')
     return dataset, data_loader, dist_sampler
