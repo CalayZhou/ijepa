@@ -356,12 +356,13 @@ def main(args, resume_preempt=False):
         for itr, (udata, masks_enc, masks_pred) in enumerate(unsupervised_loader):
 
             def load_imgs():
-                # -- unsupervised imgs
-                imgs = udata[0].to(device, non_blocking=True)
+                # -- unsupervised img pairs
+                img1 = udata[0].to(device, non_blocking=True)
+                img2 = udata[1].to(device, non_blocking=True)
                 masks_1 = [u.to(device, non_blocking=True) for u in masks_enc]
                 masks_2 = [u.to(device, non_blocking=True) for u in masks_pred]
-                return (imgs, masks_1, masks_2)
-            imgs, masks_enc, masks_pred = load_imgs()
+                return (img1, img2, masks_1, masks_2)
+            imgs1, imgs2, masks_enc, masks_pred = load_imgs()
             maskA_meter.update(len(masks_enc[0][0]))
             maskB_meter.update(len(masks_pred[0][0]))
 
@@ -372,7 +373,7 @@ def main(args, resume_preempt=False):
 
                 def forward_target():
                     with torch.no_grad():
-                        h = target_encoder(imgs)
+                        h = target_encoder(imgs2)
                         h = F.layer_norm(h, (h.size(-1),))  # normalize over feature-dim
                         B = len(h)
                         # -- create targets (masked regions of h)
@@ -381,8 +382,9 @@ def main(args, resume_preempt=False):
                         return h
 
                 def forward_context():
-                    z = encoder(imgs, masks_enc)
-                    z = predictor(z, masks_enc, masks_pred)
+                    z_q = encoder(imgs2, masks_enc)
+                    z_kv = encoder(imgs1, masks=None)
+                    z = predictor(z_q, z_kv, masks_enc, masks_pred)
                     return z
 
                 def loss_fn(z, h):
