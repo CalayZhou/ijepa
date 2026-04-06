@@ -6,6 +6,7 @@
 #
 
 import os
+import random
 from logging import getLogger
 
 from PIL import Image
@@ -20,7 +21,7 @@ logger = getLogger()
 
 
 class MultiViewFirstFrameDataset(Dataset):
-    """Dataset that loads the first frame from each multi-view sample folder."""
+    """Dataset that loads a random frame from each multi-view sample folder."""
 
     IMG_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
 
@@ -31,7 +32,7 @@ class MultiViewFirstFrameDataset(Dataset):
 
         if not self.samples:
             raise RuntimeError(
-                f'No valid first-frame samples found in view_roots={self.view_roots}'
+                f'No valid frame samples found in view_roots={self.view_roots}'
             )
 
         logger.info(
@@ -57,7 +58,9 @@ class MultiViewFirstFrameDataset(Dataset):
                     continue
 
                 frame_names.sort()
-                samples.append(os.path.join(dirpath, frame_names[0]))
+                samples.append(
+                    [os.path.join(dirpath, frame_name) for frame_name in frame_names]
+                )
                 root_count += 1
 
             logger.info('Collected %d samples from %s', root_count, root)
@@ -68,7 +71,7 @@ class MultiViewFirstFrameDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index):
-        frame_path = self.samples[index]
+        frame_path = random.choice(self.samples[index])
         img = Image.open(frame_path).convert('RGB')
 
         if self.transform is not None:
@@ -112,7 +115,7 @@ def make_mvi_frame_loader(
         persistent_workers=False,
     )
 
-    logger.info('Multi-view first-frame unsupervised data loader created')
+    logger.info('Multi-view random-frame unsupervised data loader created')
     return dataset, data_loader, dist_sampler
 
 
@@ -170,7 +173,7 @@ def make_imagenet_and_mvi_frame_loader(
         persistent_workers=False,
     )
 
-    logger.info('ImageNet + multi-view first-frame unsupervised data loader created')
+    logger.info('ImageNet + multi-view random-frame unsupervised data loader created')
     return dataset, data_loader, dist_sampler
 
 

@@ -6,6 +6,7 @@
 #
 
 import os
+import random
 from logging import getLogger
 
 from PIL import Image
@@ -19,7 +20,7 @@ logger = getLogger()
 
 
 class MultiVideoFirstFrameDataset(Dataset):
-    """Dataset that loads the first frame from each per-video frame folder."""
+    """Dataset that loads a random frame from each per-video frame folder."""
 
     IMG_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
 
@@ -30,7 +31,7 @@ class MultiVideoFirstFrameDataset(Dataset):
 
         if not self.samples:
             raise RuntimeError(
-                f'No valid first-frame samples found in video_roots={self.video_roots}'
+                f'No valid frame samples found in video_roots={self.video_roots}'
             )
 
         logger.info(
@@ -51,18 +52,18 @@ class MultiVideoFirstFrameDataset(Dataset):
                 if not entry.is_dir():
                     continue
 
-                first_frame = self._find_first_frame(entry.path)
-                if first_frame is None:
+                frame_paths = self._find_frames(entry.path)
+                if frame_paths is None:
                     continue
 
-                samples.append(first_frame)
+                samples.append(frame_paths)
                 root_count += 1
 
             logger.info('Collected %d samples from %s', root_count, root)
 
         return samples
 
-    def _find_first_frame(self, folder_path):
+    def _find_frames(self, folder_path):
         frame_names = [
             f.name for f in os.scandir(folder_path)
             if f.is_file() and f.name.lower().endswith(self.IMG_EXTENSIONS)
@@ -71,13 +72,13 @@ class MultiVideoFirstFrameDataset(Dataset):
             return None
 
         frame_names.sort()
-        return os.path.join(folder_path, frame_names[0])
+        return [os.path.join(folder_path, frame_name) for frame_name in frame_names]
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index):
-        frame_path = self.samples[index]
+        frame_path = random.choice(self.samples[index])
         img = Image.open(frame_path).convert('RGB')
 
         if self.transform is not None:
@@ -121,7 +122,7 @@ def make_video_frame_loader(
         persistent_workers=False,
     )
 
-    logger.info('Video first-frame unsupervised data loader created')
+    logger.info('Video random-frame unsupervised data loader created')
     return dataset, data_loader, dist_sampler
 
 
@@ -179,5 +180,5 @@ def make_imagenet_and_video_frame_loader(
         persistent_workers=False,
     )
 
-    logger.info('ImageNet + video first-frame unsupervised data loader created')
+    logger.info('ImageNet + video random-frame unsupervised data loader created')
     return dataset, data_loader, dist_sampler
