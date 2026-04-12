@@ -50,6 +50,7 @@ from src.datasets.mvi_frame import (
     make_mvi_frame_loader,
     make_imagenet_and_mvi_frame_loader,
     make_imagenet_video_and_mvi_frame_loader,
+    make_video_and_mvi_frame_loader,
 )
 
 from src.helper import (
@@ -263,6 +264,18 @@ def main(args, resume_preempt=False):
             root_path=root_path,
             image_folder=image_folder,
             copy_data=copy_data,
+            video_roots=video_roots,
+            view_roots=view_roots,
+            drop_last=True)
+    elif dataset_type == 'video_plus_mvi_first_frame':
+        _, unsupervised_loader, unsupervised_sampler = make_video_and_mvi_frame_loader(
+            transform=transform,
+            batch_size=batch_size,
+            collator=mask_collator,
+            pin_mem=pin_mem,
+            num_workers=num_workers,
+            world_size=world_size,
+            rank=rank,
             video_roots=video_roots,
             view_roots=view_roots,
             drop_last=True)

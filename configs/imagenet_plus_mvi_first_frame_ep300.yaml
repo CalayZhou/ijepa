@@ -1,7 +1,5 @@
 data:
-  dataset_type: imagenet_plus_mvi_first_frame
-  root_path: $replace_this_with_absolute_path_to_your_datasets_directory
-  image_folder: imagenet_full_size/061417/
+  dataset_type: mvi_first_frame
   view_roots:
   - /projects/calayssd/JEPA_DATASET/VIEW/omniobject3d_512/
   - /projects/zijunssd/MVI2/MVI2/
@@ -17,7 +15,7 @@ data:
   use_gaussian_blur: false
   use_horizontal_flip: false
 logging:
-  folder: $replace_this_with_path_for_experiment_logs/in1k-plus-mvi-first-frame-vith14.224-bs.2048-ep.300/
+  folder: $replace_this_with_path_for_experiment_logs/mvi-first-frame-vith14.224-bs.2048-ep.300/
   write_tag: jepa
 mask:
   allow_overlap: false

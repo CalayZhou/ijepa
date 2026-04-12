@@ -275,3 +275,60 @@ def make_imagenet_video_and_mvi_frame_loader(
         'unsupervised data loader created'
     )
     return dataset, data_loader, dist_sampler
+
+
+def make_video_and_mvi_frame_loader(
+    transform,
+    batch_size,
+    collator=None,
+    pin_mem=True,
+    num_workers=8,
+    world_size=1,
+    rank=0,
+    video_roots=None,
+    view_roots=None,
+    drop_last=True,
+):
+    video_roots = video_roots or []
+    view_roots = view_roots or []
+
+    video_dataset = MultiVideoFramePairDataset(
+        video_roots=video_roots,
+        transform=transform,
+    )
+    mvi_dataset = MultiViewFramePairDataset(
+        view_roots=view_roots,
+        transform=transform,
+    )
+
+    dataset = ConcatDataset([video_dataset, mvi_dataset])
+    logger.info(
+        'Combined dataset created: video-frame-pair=%d, '
+        'multi-view-frame-pair=%d, total=%d',
+        len(video_dataset),
+        len(mvi_dataset),
+        len(dataset),
+    )
+
+    dist_sampler = torch.utils.data.distributed.DistributedSampler(
+        dataset=dataset,
+        num_replicas=world_size,
+        rank=rank,
+    )
+
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        collate_fn=collator,
+        sampler=dist_sampler,
+        batch_size=batch_size,
+        drop_last=drop_last,
+        pin_memory=pin_mem,
+        num_workers=num_workers,
+        persistent_workers=False,
+    )
+
+    logger.info(
+        'Video frame-pair + multi-view frame-pair '
+        'unsupervised data loader created'
+    )
+    return dataset, data_loader, dist_sampler
