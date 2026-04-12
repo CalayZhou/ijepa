@@ -1,7 +1,5 @@
 data:
-  dataset_type: imagenet_plus_video_plus_mvi_first_frame
-  root_path: $replace_this_with_absolute_path_to_your_datasets_directory
-  image_folder: imagenet_full_size/061417/
+  dataset_type: video_plus_mvi_first_frame
   video_roots:
   - /projects/calayssd/JEPA_DATASET/VIDEO/sth2_rawframes/
   - /projects/calayssd/JEPA_DATASET/VIDEO/ava_frames/
@@ -22,7 +20,7 @@ data:
   use_gaussian_blur: false
   use_horizontal_flip: false
 logging:
-  folder: $replace_this_with_path_for_experiment_logs/in1k-plus-video-plus-mvi-first-frame-vith14.224-bs.2048-ep.300/
+  folder: $replace_this_with_path_for_experiment_logs/video-plus-mvi-first-frame-vith14.224-bs.2048-ep.300/
   write_tag: jepa
 mask:
   allow_overlap: false
